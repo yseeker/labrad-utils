@@ -320,36 +320,13 @@ def plot_fig(file_name, file_num, data, cl, xsize, ysize, xaxis, yaxis, xscale, 
         flag = False
         pass
     
-    if flag:
-        print '\r','slack plotting...',
-        try:
-            files = {'file': open(save_path+file_name+'//'+file_name+'_'+str(file_num)+' at '+str(var, 4)+' ' + unit +'.png', 'rb')}
-            param = {
-                'token':TOKEN,
-                'channels':CHANNEL,
-                'title': file_name+'_'+str(file_num)+' at '+str(var, 4)+' ' + unit
-            }
-            requests.post(url="https://slack.com/api/files.upload",params=param, files=files)
-        except Exception:
-            print '\r','slack plotting failed',
-            pass
 
 
 
-def slack_post(file_path, file_number, date, scan_name, sweep_values):
+    
 
-    print '\r','slack plotting...',
-    try:
-        files = {'file': open(save_path+file_name+'//'+file_name+'_'+str(file_num)+' at '+str(var, 4)+' ' + unit +'.png', 'rb')}
-        param = {
-            'token':TOKEN,
-            'channels':CHANNEL,
-            'title': file_name+'_'+str(file_num)+' at '+str(var, 4)+' ' + unit
-        }
-        requests.post(url="https://slack.com/api/files.upload",params=param, files=files)
-    except Exception:
-        print '\r','slack plotting failed',
-        pass
+
+
 
 def find_vt_vb(p0, n0, c_delta):    # input p0, n0, return vt, vb
     return 0.5 * (n0 + p0) / (1.0 + c_delta), 0.5 * (n0 - p0) / (1.0 - c_delta)
@@ -361,20 +338,22 @@ def sim_sweep(out_ch, vstart, vend, points, delay):
     d_tmp = None
     p1, p2, p3 = 0, 0, 0
 
-    for jj in range(points):
-        sim.dc_set_voltage(out_ch,float("{0:.4f}".format(vs[jj])))
-        #time.sleep(delay*0.9)
-        try:
-        #line_data = [DAC.read_voltage(k) for k in in_dac_ch]
-            p1, p2, p3 = LA1.x(), 1.0, 1.0
-            line_data = [p1, p2, p3]
-        except:
-            line_data = [p1, p2, p3]
-            
-        if d_tmp is not None:
-            d_tmp = np.vstack([d_tmp, line_data])
-        else:
-            d_tmp = line_data
+    with tqdm(range(points), leave = True) as pbar:
+        pbar.set_description(f'start V : {vstart}, end V : {vend}')
+        for jj in pbar:
+            sim.dc_set_voltage(out_ch,float("{0:.4f}".format(vs[jj])))
+            #time.sleep(delay*0.9)
+            try:
+            #line_data = [DAC.read_voltage(k) for k in in_dac_ch]
+                p1, p2, p3 = LA1.x(), 1.0, 1.0
+                line_data = [p1, p2, p3]
+            except:
+                line_data = [p1, p2, p3]
+                
+            if d_tmp is not None:
+                d_tmp = np.vstack([d_tmp, line_data])
+            else:
+                d_tmp = line_data
 
     return  d_tmp.T
 
@@ -584,7 +563,6 @@ def scan_Vg_one(voltage_source, meas_voltage_gain, amplitude, voltage_channel, s
     #vg_ind = np.linspace(1, number_of_vg_points, number_of_vg_points)
     vg = np.linspace(start_v, end_v, number_of_vg_points)   
     
-    print '\r','Scanning Vg:  Start_V:', start_v, ' V; End_V:', end_v, ' V',
     if voltage_source == "DAC":
         res = DAC.buffer_ramp([voltage_channel], [adc_channel_0, adc_channel_1, adc_channel_2,adc_channel_3],[start_v],[end_v],number_of_vg_points, wait_time, 1)
 
@@ -957,7 +935,112 @@ def set_T(setpoint):
                     
     
     
-                    
+# Same code for R_vs_Vg_at_fixedBz
+def minimal_measurement_template(
+    file_path,
+    voltage_source,
+    voltage_channel_bottom,
+    voltage_channel_top,
+    amplitude = 0.01,
+    frequency = 17.777,
+    gate_gain = 1.0,
+    meas_voltage_gain = 1.0,
+    displacement_field = 0.0,
+    bz_range = [0.0, 0.0],
+    n_range = [-1.0, 1.0],
+    number_of_bz_lines = 1,
+    number_of_n_points = 200,
+    wait_time = wait_time,
+    c_delta = 0.0,
+    misc = "misc"
+):
+    
+    #Get date, parameters and scan name
+    cxn0 = labrad.connect()
+    DV = cxn0.data_vault
+    date1 = datetime.datetime.now()
+    meas_parameters = get_meas_parameters()
+    scan_name = sys._getframe().f_code.co_name
+
+    #Initial settings of lockins
+    set_lockin_parameters(amplitude, frequency)
+    
+    #Create data file and save measurement parameters
+    scan_var = ('n_ind', 'n', 'Bz_ind', 'iBz', 'Bz','Tmc', 'Tp')
+    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
+    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
+    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
+
+    #Create meshes
+    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
+    b_lines = np.linspace(bz_range[0], bz_range[1], number_of_bz_lines)
+    
+    t_mc0, t_p0 = 0, 0
+    D_val = displacement_field
+    ##### Measurements start #####
+    # go to initial gate volatge
+    vtg_last, vbg_last = 0, 0
+    one_epoch_time_list = []
+    with tqdm(enumerate(b_lines, 1), position = 0) as pbar:
+        for ind, val in pbar:
+            if ind > 1:
+                average_one_epoch = sum(one_epoch_time_list)/len(one_epoch_time_list)
+                expected_time = datetime.datetime.now()+(len(b_lines)-ind)*(average_one_epoch):
+                pbar.set_postfix(f'1 epoch : {average_one_epoch}, expected : {expected_time}')
+            d3 = datetime.datetime.now()
+            actual_B = set_Bz(MGz, val)
+            #print '\r',"Field Line:", ind, "out of ", number_of_bz_lines
+            vtg_s, vbg_s = find_vt_vb(D_val, n_range[0], c_delta)
+            vtg_e, vbg_e = find_vt_vb(D_val, n_range[1], c_delta)
+            sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
+                        out_ch_top = voltage_channel_top, 
+                        vbg_start = vbg_last, vbg_end = vbg_s, 
+                        vtg_start = vtg_last, vtg_end = vtg_s, 
+                        points_vbg = 40, points_vtg = 40, delay = 0.005)        
+            n_ind = np.linspace(1, number_of_n_points, number_of_n_points)
+            n = gate_gain* np.linspace(n_range[0], n_range[1], number_of_n_points)  
+            b_ind = np.linspace(ind, ind, number_of_n_points)
+            b_val = val * np.ones(number_of_n_points)
+            b_ac = actual_B * np.ones(number_of_n_points)
+            ib_val = np.float64(1.0/actual_B) * np.ones(number_of_n_points)
+            t_mc = t_mc0 * np.ones(number_of_n_points)
+            t_p = t_p0 * np.ones(number_of_n_points)
+            
+            data1 = np.array([n_ind, n, b_ind, ib_val, b_val, t_mc, t_p])
+            # Scan Vg and acquire data
+            
+            data2 = scan_Vg_dual_one(voltage_source, meas_voltage_gain,
+                                    amplitude = amplitude,
+                                    out_ch_bottom = voltage_channel_bottom, 
+                                    out_ch_top = voltage_channel_top, 
+                                    vbg_start = vbg_s, vbg_end = vbg_e,
+                                    vtg_start = vtg_s, vtg_end = vtg_e, 
+                                    points_vbg = number_of_n_points, 
+                                    points_vtg = number_of_n_points, 
+                                    wait_time = wait_time)
+            
+            vtg_last, vbg_last = vtg_e, vbg_e
+            data = np.vstack((data1, data2))
+            DV.add(data.T)
+            
+            one_epoch_time = datetime.datetime.now()-d3
+            
+            plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "n", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 100, 100000, 0, 1000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, True, False], var = 0, unit = "T")
+            
+            #go to next gate voltage
+        
+    # go to 0 V
+    sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
+                   out_ch_top = voltage_channel_top, 
+                   vbg_start = vbg_last, vbg_end = 0.0, 
+                   vtg_start = vtg_last, vtg_end = 0.0, 
+                   points_vbg = 40, points_vtg = 40, delay = 0.005)
+    print '\r',"measurement number: ", file_number, scan_name, " done"
+    ##### Measurements done #####
+    date2 = datetime.datetime.now()
+    write_meas_parameters_end(date1, date2, file_path)
+
+
 def scan_R_vs_Vg_Bz(
     file_path,
     voltage_source,
@@ -1031,9 +1114,7 @@ def scan_R_vs_Vg_Bz(
     write_meas_parameters_end(date1, date2, file_path)
     
     
-    
 
-    
 def scan_R_vs_n_Bz_at_fixedD(
     file_path,
     voltage_source,
@@ -1134,312 +1215,10 @@ def scan_R_vs_n_Bz_at_fixedD(
     write_meas_parameters_end(date1, date2, file_path)
     
     
-    
-def scan_R_vs_n_Bz_at_fixedD_diagonal(
-    file_path,
-    voltage_source,
-    voltage_channel_bottom,
-    voltage_channel_top,
-    amplitude = 0.01,
-    frequency = 17.777,
-    gate_gain = 1.0,
-    meas_voltage_gain = 1.0,
-    displacement_field = [0.0,0.0],
-    bz_range = [0.0, 0.0],
-    n_range = [-1.0, 1.0],
-    number_of_bz_lines = 1,
-    number_of_n_points = 200,
-    wait_time = wait_time,
-    c_delta = 0.0,
-    misc = "misc"
-):
-    
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
 
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('n_ind', 'n', 'Bz_ind', 'iBz', 'Bz','Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
 
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    b_lines = np.linspace(bz_range[0], bz_range[1], number_of_bz_lines)
     
-    t_mc0, t_p0 = 0, 0
-    D_val = displacement_field
-    ##### Measurements start #####
-    # go to initial gate volatge
-    vtg_last, vbg_last = 0, 0
-    for ind, val in enumerate(b_lines, 1):
-        d3 = datetime.datetime.now()
-        actual_B = set_Bz(MGz, val)
-        print '\r',"Field Line:", ind, "out of ", number_of_bz_lines
-        vtg_s, vbg_s = find_vt_vb(D_val[0], n_range[0], c_delta)
-        vtg_e, vbg_e = find_vt_vb(D_val[1], n_range[1], c_delta)
-        sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                       out_ch_top = voltage_channel_top, 
-                       vbg_start = vbg_last, vbg_end = vbg_s, 
-                       vtg_start = vtg_last, vtg_end = vtg_s, 
-                       points_vbg = 40, points_vtg = 40, delay = 0.005)        
-        n_ind = np.linspace(1, number_of_n_points, number_of_n_points)
-        n = gate_gain* np.linspace(n_range[0], n_range[1], number_of_n_points)  
-        b_ind = np.linspace(ind, ind, number_of_n_points)
-        b_val = val * np.ones(number_of_n_points)
-        b_ac = actual_B * np.ones(number_of_n_points)
-        ib_val = np.float64(1.0/actual_B) * np.ones(number_of_n_points)
-        t_mc = t_mc0 * np.ones(number_of_n_points)
-        t_p = t_p0 * np.ones(number_of_n_points)
-        
-        data1 = np.array([n_ind, n, b_ind, ib_val, b_val, t_mc, t_p])
-        # Scan Vg and acquire data
-        
-        data2 = scan_Vg_dual_one(voltage_source, meas_voltage_gain,
-                                 amplitude = amplitude,
-                             out_ch_bottom = voltage_channel_bottom, 
-                             out_ch_top = voltage_channel_top, 
-                             vbg_start = vbg_s, vbg_end = vbg_e,
-                             vtg_start = vtg_s, vtg_end = vtg_e, 
-                             points_vbg = number_of_n_points, 
-                             points_vtg = number_of_n_points, 
-                             wait_time = wait_time)
-        t = datetime.datetime.now()-d3
-        print '\r', "one epoch time:", t, "estimated finish time:", datetime.datetime.now()+(len(b_lines)-ind)*t 
-        vtg_last, vbg_last = vtg_e, vbg_e
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        
-    
-        
-#         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "n", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0, 15000, 0, 1000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
-        
-        #go to next gate voltage
-        
-    # go to 0 V
-    sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                   out_ch_top = voltage_channel_top, 
-                   vbg_start = vbg_last, vbg_end = 0.0, 
-                   vtg_start = vtg_last, vtg_end = 0.0, 
-                   points_vbg = 40, points_vtg = 40, delay = 0.005)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-def scan_R_vs_n_invBz_Bz_mixed_at_fixedD(
-    file_path,
-    voltage_source,
-    voltage_channel_bottom,
-    voltage_channel_top,
-    amplitude = 0.01,
-    frequency = 17.777,
-    gate_gain = 1.0,
-    meas_voltage_gain = 1.0,
-    displacement_field = 0.0,
-    ibz_range = [10, 10],
-    bz_range = [0, 0],
-    n_range = [-1.0, 1.0],
-    number_of_ibz_lines = 1,
-    number_of_bz_lines = 1,
-    number_of_n_points = 200,
-    wait_time = wait_time,
-    c_delta = 0.0,
-    reverse = False,
-    misc = "misc"
-):
-    
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
 
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('n_ind', 'n', 'iBz_ind', 'iBz', 'Bz','Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    ib_lines = np.linspace(ibz_range[0], ibz_range[1], number_of_ibz_lines)
-    b_lines = np.linspace(bz_range[0], bz_range[1], number_of_bz_lines)
-    
-    mixed_lines = sorted(np.append(b_lines, 1.0/ib_lines), reverse = reverse)
-    t_mc0, t_p0 = 0, 0
-    D_val = displacement_field
-    ##### Measurements start #####
-    # go to initial gate volatge
-    vtg_last, vbg_last = 0, 0
-    for ind, val in enumerate(mixed_lines, 1):
-        d3 = datetime.datetime.now()
-        actual_B = set_Bz(MGz, val)
-        print '\r',"Field Line:", ind, "out of ", len(mixed_lines)
-        vtg_s, vbg_s = find_vt_vb(D_val, n_range[0], c_delta)
-        vtg_e, vbg_e = find_vt_vb(D_val, n_range[1], c_delta)
-        sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                       out_ch_top = voltage_channel_top, 
-                       vbg_start = vbg_last, vbg_end = vbg_s, 
-                       vtg_start = vtg_last, vtg_end = vtg_s, 
-                       points_vbg = 40, points_vtg = 40, delay = 0.005)        
-        n_ind = np.linspace(1, number_of_n_points, number_of_n_points)
-        n = gate_gain* np.linspace(n_range[0], n_range[1], number_of_n_points)  
-        ib_ind = np.linspace(ind, ind, number_of_n_points)
-        if abs(val) <= 0.001:
-            rval = 1000
-        else:
-            rval = 1.0/val
-        ib_val = rval * np.ones(number_of_n_points)
-        b_ac = actual_B * np.ones(number_of_n_points)
-        t_mc = t_mc0 * np.ones(number_of_n_points)
-        t_p = t_p0 * np.ones(number_of_n_points)
-        
-        data1 = np.array([n_ind, n, ib_ind, ib_val, b_ac, t_mc, t_p])
-        # Scan Vg and acquire data
-        
-        data2 = scan_Vg_dual_one(voltage_source, meas_voltage_gain,
-                                 amplitude = amplitude,
-                             out_ch_bottom = voltage_channel_bottom, 
-                             out_ch_top = voltage_channel_top, 
-                             vbg_start = vbg_s, vbg_end = vbg_e,
-                             vtg_start = vtg_s, vtg_end = vtg_e, 
-                             points_vbg = number_of_n_points, 
-                             points_vtg = number_of_n_points, 
-                             wait_time = wait_time)
-        vtg_last, vbg_last = vtg_e, vbg_e
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        t = datetime.datetime.now()-d3
-        print '\r', "one epoch time:", t, "estimated finish time:", datetime.datetime.now()+(len(mixed_lines)-ind)*t 
-        
-    
-        
-#         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "n", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0, 1000, 0, 1000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
-        # go to next gate voltage
-        
-    # go to 0 V
-    sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                   out_ch_top = voltage_channel_top, 
-                   vbg_start = vbg_last, vbg_end = 0.0, 
-                   vtg_start = vtg_last, vtg_end = 0.0, 
-                   points_vbg = 40, points_vtg = 40, delay = 0.005)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-    
-def scan_R_vs_n_invBz2_at_fixedD(
-    file_path,
-    voltage_source,
-    voltage_channel_bottom,
-    voltage_channel_top,
-    amplitude = 0.01,
-    frequency = 17.777,
-    gate_gain = 1.0,
-    meas_voltage_gain = 1.0,
-    displacement_field = 0.0,
-    ibz_range = [10, 10],
-    n_range = [-1.0, 1.0],
-    number_of_ibz_lines = 1,
-    number_of_n_points = 200,
-    wait_time = wait_time,
-    c_delta = 0.0,
-    misc = "misc"
-):
-    
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('n_ind', 'n', 'iBz_ind', 'iBz', 'Bz','Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    ib_lines = np.linspace(ibz_range[0], ibz_range[1], number_of_ibz_lines)
-
-    t_mc0, t_p0 = 0, 0
-    D_val = displacement_field
-    ##### Measurements start #####
-    # go to initial gate volatge
-    vtg_last, vbg_last = 0, 0
-    for ind, val in enumerate(ib_lines, 1):
-        d3 = datetime.datetime.now()
-        actual_B = set_Bz(MGz, 1.0/val)
-        print '\r',"Field Line:", ind, "out of ", len(ib_lines)
-        vtg_s, vbg_s = find_vt_vb(D_val, n_range[0], c_delta)
-        vtg_e, vbg_e = find_vt_vb(D_val, n_range[1], c_delta)
-        sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                       out_ch_top = voltage_channel_top, 
-                       vbg_start = vbg_last, vbg_end = vbg_s, 
-                       vtg_start = vtg_last, vtg_end = vtg_s, 
-                       points_vbg = 40, points_vtg = 40, delay = 0.005)        
-        n_ind = np.linspace(1, number_of_n_points, number_of_n_points)
-        n = gate_gain* np.linspace(n_range[0], n_range[1], number_of_n_points)  
-        ib_ind = np.linspace(ind, ind, number_of_n_points)
-        ib_val = val * np.ones(number_of_n_points)
-        b_ac = actual_B * np.ones(number_of_n_points)
-        t_mc = t_mc0 * np.ones(number_of_n_points)
-        t_p = t_p0 * np.ones(number_of_n_points)
-        
-        data1 = np.array([n_ind, n, ib_ind, ib_val, b_ac, t_mc, t_p])
-        # Scan Vg and acquire data
-        
-        data2 = scan_Vg_dual_one(voltage_source, meas_voltage_gain,
-                                 amplitude = amplitude,
-                             out_ch_bottom = voltage_channel_bottom, 
-                             out_ch_top = voltage_channel_top, 
-                             vbg_start = vbg_s, vbg_end = vbg_e,
-                             vtg_start = vtg_s, vtg_end = vtg_e, 
-                             points_vbg = number_of_n_points, 
-                             points_vtg = number_of_n_points, 
-                             wait_time = wait_time)
-        t = datetime.datetime.now()-d3
-        print '\r', "one epoch time:", t, "estimated finish time:", datetime.datetime.now()+(len(ib_lines)-ind)*t 
-        vtg_last, vbg_last = vtg_e, vbg_e
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        
-    
-        
-#         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "n", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0, 1000, 0, 1000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
-        # go to next gate voltage
-        
-    # go to 0 V
-    sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                   out_ch_top = voltage_channel_top, 
-                   vbg_start = vbg_last, vbg_end = 0.0, 
-                   vtg_start = vtg_last, vtg_end = 0.0, 
-                   points_vbg = 40, points_vtg = 40, delay = 0.005)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
 
 def scan_R_vs_n_D(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel_bottom, voltage_channel_top, n_range, D_range, number_of_D_lines, number_of_n_points, c_delta, wait_time):
     
@@ -1526,905 +1305,11 @@ def scan_R_vs_n_D(misc, file_path, amplitude, frequency, gate_gain, meas_voltage
     ##### Measurements done #####
     date2 = datetime.datetime.now()
     write_meas_parameters_end(date1, date2, file_path)
-    
-    
 
-def scan_R_vs_n_D_fixedBz(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel_bottom, voltage_channel_top, magnetic_field, n_range, D_range, number_of_D_lines, number_of_n_points, c_delta, wait_time):
-    
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
 
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('n_ind', 'n', 'D_ind', 'D', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-    DV.add_parameter('live_plots', [('n', 'D', 'R1')])
 
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    D_lines = np.linspace(D_range[0], D_range[1], number_of_D_lines)
-    
-    t_mc0, t_p0 = 0, 0
-#     vt_start, vg_start = find_vt_vb(D_range[0], n_range[0], c_delta)
-#     vt_end, vg_end = find_vt_vb(D_range[1], n_range[1], c_delta)
-    ##### Measurements start #####
-    # go to initial gate volatge
-#     set_Vg_nodac(voltage_source, voltage_channel_bottom, 0.0, vg_start)
-    set_Bz(MGz, magnetic_field)
-    vtg_last, vbg_last = 0, 0
-    for ind, D_val in enumerate(D_lines):
-        d3 = datetime.datetime.now()
-        vtg_s, vbg_s = find_vt_vb(D_val, n_range[0], c_delta)
-        vtg_e, vbg_e = find_vt_vb(D_val, n_range[1], c_delta)
-        sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                       out_ch_top = voltage_channel_top, 
-                       vbg_start = vbg_last, vbg_end = vbg_s, 
-                       vtg_start = vtg_last, vtg_end = vtg_s, 
-                       points_vbg = 40, points_vtg = 40, delay = 0.005)    
-#         if ind == 0: set_Vg_nodac(voltage_source, voltage_channel_top, 0.0, vt_start)
-#         else: set_Vg_nodac(voltage_source, voltage_channel_top, vgt_lines[ind-1], val)
-        print '\r',"D Line:", ind + 1, "out of ", number_of_D_lines
-        
-        n_ind = np.linspace(1, number_of_n_points, number_of_n_points)
-        n = gate_gain* np.linspace(n_range[0], n_range[1], number_of_n_points)  
-        D_ind = np.linspace(ind, ind, number_of_n_points)
-        D = D_val * np.ones(number_of_n_points)
-        t_mc = t_mc0 * np.ones(number_of_n_points)
-        t_p = t_p0 * np.ones(number_of_n_points)
-        
-        data1 = np.array([n_ind, n, D_ind, D, t_mc, t_p])
-        # Scan Vg and acquire data
-        
-        data2 = scan_Vg_dual_one(voltage_source, meas_voltage_gain,
-                                 amplitude = amplitude,
-                             out_ch_bottom = voltage_channel_bottom, 
-                             out_ch_top = voltage_channel_top, 
-                             vbg_start = vbg_s, vbg_end = vbg_e,
-                             vtg_start = vtg_s, vtg_end = vtg_e, 
-                             points_vbg = number_of_n_points, 
-                             points_vtg = number_of_n_points, 
-                             wait_time = wait_time)
-        vtg_last, vbg_last = vtg_e, vbg_e
-        
-        t = datetime.datetime.now()-d3
-        print '\r', "one epoch time:", t, "estimated finish time:", datetime.datetime.now()+(len(D_lines)-ind)*t 
-        
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        
-        
-#         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "n", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0, 1000, 0, 4000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
-        # go to next gate voltage
-#         if ind < number_of_vgt_lines: 
-#             set_Vg_nodac(voltage_source, voltage_channel_bottom, vgb_range[1], vgb_range[0])
-    # go to 0 V
-    
-    sim_dual_sweep(out_ch_bottom = voltage_channel_bottom, 
-                   out_ch_top = voltage_channel_top, 
-                   vbg_start = vbg_last, vbg_end = 0.0, 
-                   vtg_start = vtg_last, vtg_end = 0.0, 
-                   points_vbg = 40, points_vtg = 40, delay = 0.005)
-    set_Bz(MGz, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-def scan_R_vs_dual_gates(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel_bottom, voltage_channel_top,vgt_range, vgb_range, number_of_vgt_lines, number_of_vgb_points, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
 
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vgb_ind', 'Vgb', 'Vgt_ind', 'Vgt', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    vgt_lines = np.linspace(vgt_range[0], vgt_range[1], number_of_vgt_lines)
-    
-    t_mc0, t_p0 = 0, 0
-    
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel_bottom, 0.0, vgb_range[0])
-
-    for ind, val in enumerate(vgt_lines):
-        if ind == 0: set_Vg_nodac(voltage_source, voltage_channel_top, 0.0, val)
-        else: set_Vg_nodac(voltage_source, voltage_channel_top, vgt_lines[ind-1], val)
-        print '\r',"Vgt Line:", ind + 1, "out of ", number_of_vgt_lines
-        
-        vgb_ind = np.linspace(1, number_of_vgb_points, number_of_vgb_points)
-        vgb = gate_gain* np.linspace(vgb_range[0], vgb_range[1], number_of_vgb_points)  
-        vgt_ind = np.linspace(ind, ind, number_of_vgb_points)
-        vgt_val = val * np.ones(number_of_vgb_points)
-        t_mc = t_mc0 * np.ones(number_of_vgb_points)
-        t_p = t_p0 * np.ones(number_of_vgb_points)
-        
-        data1 = np.array([vgb_ind, vgb, vgt_ind, vgt_val, t_mc, t_p])
-        # Scan Vg and acquire data
-        data2 = scan_Vg(voltage_source, meas_voltage_gain, voltage_channel_bottom, vgb_range[0], vgb_range[1], number_of_vgb_points, wait_time/4)
-        
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        
-#         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "Vgb", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0, 4000, 0, 4000], xname = "Vg", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
-        # go to next gate voltage
-        if ind < number_of_vgt_lines: 
-            set_Vg_nodac(voltage_source, voltage_channel_bottom, vgb_range[1], vgb_range[0])
-        
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel_bottom, vgb_range[1], 0.0)
-    set_Vg_nodac(voltage_source, voltage_channel_top, vgt_range[1], 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-    
-
-    
-
-def scan_R_vs_Vg_theta(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel,theta_range, vg_range, number_of_theta_lines, number_of_vg_points, fixed_Bz,fixed_Br,wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg_ind', 'Vg', 'theta_ind', 'theta', 'Bx_ac', 'By_ac', 'Bz_ac', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    theta_lines = np.linspace(theta_range[0], theta_range[1], number_of_theta_lines)
-    rot_mat = calc_rotation_matrix(0,0,1,0,0,1)
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg_range[0])
-
-    for ind, theta in enumerate(theta_lines, 1):
-        x0, y0 = fixed_Br*np.cos(np.radians(theta)), fixed_Br*np.sin(np.radians(theta)) 
-        x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-        if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-            actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-            print '\r',"Theta Line:", ind, "out of ", number_of_theta_lines
-
-            vg_ind = np.linspace(1, number_of_vg_points, number_of_vg_points)
-            vg = gate_gain* np.linspace(vg_range[0], vg_range[1], number_of_vg_points)  
-            theta_ind = np.linspace(ind, ind, number_of_vg_points)
-            theta_val = theta * np.ones(number_of_vg_points)
-            bx_ac = actual_Bx * np.ones(number_of_vg_points)
-            by_ac = actual_By * np.ones(number_of_vg_points)
-            bz_ac = actual_Bz * np.ones(number_of_vg_points)
-            t_mc = t_mc0 * np.ones(number_of_vg_points)
-            t_p = t_p0 * np.ones(number_of_vg_points)
-
-            data1 = np.array([vg_ind, vg, theta_ind, theta_val, bx_ac, by_ac, bz_ac,t_mc, t_p])
-            # Scan Vg and acquire data
-            
-            data2 = scan_Vg(voltage_source, meas_voltage_gain, voltage_channel, vg_range[0], vg_range[1], number_of_vg_points, wait_time/4)
-
-            data = np.vstack((data1, data2))
-            DV.add(data.T)
-
-            #plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "Vg", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 1, 50000, -1000, 1000], xname = "Vg", yname = ['Ix', 'R1', 'R2'], logy = [False, True, False], var = 0, unit = "degree")
-            # go to next gate voltage
-            if ind < number_of_theta_lines: set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], vg_range[0])
-        
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-
-def scan_R_vs_Vg_theta2(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel,theta_range, vg_range, number_of_theta_lines, number_of_vg_points, fixed_Bz,fixed_Br,alpha,wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg_ind', 'Vg', 'theta_ind', 'theta', 'Bx_ac', 'By_ac', 'Bz_ac', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    theta_lines = np.linspace(theta_range[0], theta_range[1], number_of_theta_lines)
-    rot_mat = calc_rotation_matrix(0,0,1,-alpha*0.342,-alpha*0.9396,1)
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg_range[0])
-
-    for ind, theta in enumerate(theta_lines, 1):
-        x0, y0 = fixed_Br*np.cos(np.radians(theta)), fixed_Br*np.sin(np.radians(theta)) 
-        x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-        if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-            actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-            print '\r',"Theta Line:", ind, "out of ", number_of_theta_lines
-
-            vg_ind = np.linspace(1, number_of_vg_points, number_of_vg_points)
-            vg = gate_gain* np.linspace(vg_range[0], vg_range[1], number_of_vg_points)  
-            theta_ind = np.linspace(ind, ind, number_of_vg_points)
-            theta_val = theta * np.ones(number_of_vg_points)
-            bx_ac = actual_Bx * np.ones(number_of_vg_points)
-            by_ac = actual_By * np.ones(number_of_vg_points)
-            bz_ac = actual_Bz * np.ones(number_of_vg_points)
-            t_mc = t_mc0 * np.ones(number_of_vg_points)
-            t_p = t_p0 * np.ones(number_of_vg_points)
-
-            data1 = np.array([vg_ind, vg, theta_ind, theta_val, bx_ac, by_ac, bz_ac,t_mc, t_p])
-            # Scan Vg and acquire data
-            
-            data2 = scan_Vg(voltage_source, meas_voltage_gain, voltage_channel, vg_range[0], vg_range[1], number_of_vg_points, wait_time/4)
-
-            data = np.vstack((data1, data2))
-            DV.add(data.T)
-
-            #plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "Vg", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 1, 50000, -1000, 1000], xname = "Vg", yname = ['Ix', 'R1', 'R2'], logy = [False, True, False], var = 0, unit = "degree")
-            # go to next gate voltage
-            if ind < number_of_theta_lines: set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], vg_range[0])
-        
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-
-    
-def scan_R_vs_Vg_theta2_2omega(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel,theta_range, vg_range, number_of_theta_lines, number_of_vg_points, fixed_Bz,fixed_Br,alpha,wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg_ind', 'Vg', 'theta_ind', 'theta', 'Bx_ac', 'By_ac', 'Bz_ac', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V1b', 'V2', 'V2b', 'R1', 'R1b', 'R2', 'R2b', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    theta_lines = np.linspace(theta_range[0], theta_range[1], number_of_theta_lines)
-    rot_mat = calc_rotation_matrix(0,0,1,-alpha*0.342,-alpha*0.9396,1)
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg_range[0])
-
-    for ind, theta in enumerate(theta_lines, 1):
-        x0, y0 = fixed_Br*np.cos(np.radians(theta)), fixed_Br*np.sin(np.radians(theta)) 
-        x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-        if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-            actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-            print '\r',"Theta Line:", ind, "out of ", number_of_theta_lines
-
-            vg_ind = np.linspace(1, number_of_vg_points, number_of_vg_points)
-            vg = gate_gain* np.linspace(vg_range[0], vg_range[1], number_of_vg_points)  
-            theta_ind = np.linspace(ind, ind, number_of_vg_points)
-            theta_val = theta * np.ones(number_of_vg_points)
-            bx_ac = actual_Bx * np.ones(number_of_vg_points)
-            by_ac = actual_By * np.ones(number_of_vg_points)
-            bz_ac = actual_Bz * np.ones(number_of_vg_points)
-            t_mc = t_mc0 * np.ones(number_of_vg_points)
-            t_p = t_p0 * np.ones(number_of_vg_points)
-
-            data1 = np.array([vg_ind, vg, theta_ind, theta_val, bx_ac, by_ac, bz_ac,t_mc, t_p])
-            # Scan Vg and acquire data
-            
-            data2 = scan_Vg_2omega(voltage_source, meas_voltage_gain, voltage_channel, vg_range[0], vg_range[1], number_of_vg_points, wait_time/4)
-
-            data = np.vstack((data1, data2))
-            DV.add(data.T)
-
-            #plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "Vg", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 1, 50000, -1000, 1000], xname = "Vg", yname = ['Ix', 'R1', 'R2'], logy = [False, True, False], var = 0, unit = "degree")
-            # go to next gate voltage
-            if ind < number_of_theta_lines: set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], vg_range[0])
-        
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-
-
-def scan_R_vs_Bz_at_fixed_Vg(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel, bz_range, number_of_bz_points, vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Bz', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    Bz_points = np.linspace(bz_range[0], bz_range[1], number_of_bz_points)
-    
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-     
-    d_tmp = None
-    p1, p2, p3 = 0.0, 0.0, 0.0
-    for z in Bz_points:
-        actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, 0, 0, z)
-        time.sleep(0.2)
-        try:
-            p1, p2, p3 = LA1.x(), LA2.x(), LA3.x()
-            line_data = [vg, t_mc0, t_p0, z, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-        except: line_data = [vg, t_mc0, t_p0, z, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-
-        if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-        else: d_tmp = line_data
-            
-    d = d_tmp.T
-    vg1, T_mc, T_p, target_Bz, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3 = d
-    res_5 = np.float64(1.0)*res_2/res_1/meas_voltage_gain
-    res_6 = np.float64(1.0)*res_3/res_1/meas_voltage_gain
-    res_7 = np.float64(1.0)/res_5
-    res_8 = np.float64(1.0)/res_6
-
-    data = np.array([vg1, T_mc, T_p, target_Bz,  actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6, res_7, res_8])
-    DV.add(data.T)
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-
-
-def scan_R_vs_By_at_fixed_Vg(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel, by_range, number_of_by_points, vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'By', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    #t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    By_points = np.linspace(by_range[0], by_range[1], number_of_by_points)
-    
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-     
-    d_tmp = None
-    p1, p2, p3 = 0.0, 0.0, 0.0
-    for y in By_points:
-        y = min(max(y, -1.0),1.0)
-        actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, 0, y, 0)
-        time.sleep(0.2)
-        try:
-            p1, p2, p3 = LA1.x(), LA2.x(), LA3.x()
-            line_data = [vg, t_mc0, t_p0, y, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-        except: line_data = [vg, t_mc0, t_p0, y, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-
-        if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-        else: d_tmp = line_data
-            
-    d = d_tmp.T
-    vg1, T_mc, T_p, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3 = d
-    res_5 = np.float64(1.0)*res_2/res_1/meas_voltage_gain
-    res_6 = np.float64(1.0)*res_3/res_1/meas_voltage_gain
-    res_7 = np.float64(1.0)/res_5
-    res_8 = np.float64(1.0)/res_6
-
-    data = np.array([vg1, T_mc, T_p, target_By,  actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6, res_7, res_8])
-    DV.add(data.T)
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-def scan_R_vs_BzBy_at_fixed_Vg_at_rotated_axis(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel,bx_range, by_range, number_of_bx_points, number_of_by_points, fixed_Bz, vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Bx', 'By', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-    
-    rot_mat = calc_rotation_matrix(0,0,1,0.001,-0.005,0.2)
-    print '\r', rot_mat
-    
-    Bx_points = np.round_(np.linspace(bx_range[0], bx_range[1], number_of_bx_points),6)
-    #By_points = np.linspace(by_range[0], by_range[1], number_of_by_points)
-    
-    for i, x0 in enumerate(Bx_points):
-        d_tmp = None
-        p1, p2, p3 = 0.0, 0.0, 0.0
-        flag = False
-        if i%2 == 0: By_points = np.round_(np.linspace(by_range[0], by_range[1], number_of_by_points),6)
-        else: By_points = np.round_(np.linspace(by_range[1], by_range[0], number_of_by_points),6)
-        for y0 in By_points:
-            if x0**2 + y0**2 <= 1.0:
-                x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-                if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-                    flag = True
-                    actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-                    flag2 = True
-                    while flag2:
-                        try:
-                            p1, p2, p3 = 0.0, 0.0, 0.0
-                            time.sleep(0.3)
-                            for _ in range(20):
-                                p1 += LA1.x()
-                                p2 += LA2.x()
-                                p3 += LA3.x()
-                                time.sleep(0.1)
-                            p1 /= 20.0
-                            p2 /= 20.0
-                            p3 /= 20.0
-                            flag2 = False
-                            line_data = [vg, t_mc0, t_p0, x0, y0, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-                        except:
-                            pass
-
-                    if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-                    else: d_tmp = line_data
-        if flag and d_tmp is not None:
-            d = d_tmp.T
-            vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3 = d
-            res_5 = np.float64(1.0)*res_2/res_1/meas_voltage_gain
-            res_6 = np.float64(1.0)*res_3/res_1/meas_voltage_gain
-            res_7 = np.float64(1.0)/res_5
-            res_8 = np.float64(1.0)/res_6
-            data = np.array([vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6, res_7, res_8])
-            DV.add(data.T)
-        
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-    
-def scan_R_vs_BzBy_at_fixed_Vg_at_rotated_axis_rtheta(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel,br_range, theta_range, number_of_br_points, number_of_theta_points, fixed_Bz,vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Br', 'theta', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-    
-    rot_mat = calc_rotation_matrix(0,0,1,-0.034*0.342,-0.034*0.9396,1)
-    print '\r', rot_mat
-    
-    Br_points = np.round_(np.linspace(br_range[0], br_range[1], number_of_br_points),6)
-    theta_points = np.linspace(theta_range[0], theta_range[1], number_of_theta_points)
-    
-    for i, br in enumerate(Br_points):
-        d_tmp = None
-        flag = False
-        p1, p2, p3 = 0.0, 0.0, 0.0
-        for theta in theta_points:
-            x0, y0 = br*np.cos(np.radians(theta)), br*np.sin(np.radians(theta)) 
-            x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-            if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-                flag = True
-                actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-                flag2 = True
-                while flag2:
-                    try:
-                        p1, p2, p3 = 0.0, 0.0, 0.0
-                        time.sleep(0.1)
-                        for _ in range(20):
-                            p1 += LA1.x()
-                            p2 += LA2.x()
-                            p3 += LA3.x()
-                            time.sleep(0.05)
-                        p1 /= 20.0
-                        p2 /= 20.0
-                        p3 /= 20.0
-                        flag2 = False
-                        line_data = [vg, t_mc0, t_p0, br, theta, actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-                    except: pass
-                if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-                else: d_tmp = line_data
-        if flag and d_tmp is not None:
-            d = d_tmp.T
-            vg1, T_mc, T_p, target_Br, target_theta, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3 = d
-            res_5 = np.float64(1.0)*res_2/res_1/meas_voltage_gain
-            res_6 = np.float64(1.0)*res_3/res_1/meas_voltage_gain
-            res_7 = np.float64(1.0)/res_5
-            res_8 = np.float64(1.0)/res_6
-            data = np.array([vg1, T_mc, T_p, target_Br, target_theta, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6, res_7, res_8])
-            DV.add(data.T)
-        
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-def scan_R_vs_BrBtheta_at_fixed_Vg(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel,br_range, theta_range, number_of_br_points, number_of_theta_points, fixed_Bz,vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Br', 'theta', 'Bx', 'By', 'Bz', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-    
-    rot_mat = calc_rotation_matrix(0,0,1,-0.034*0.342,-0.034*0.9396,1)
-    print '\r', rot_mat
-    
-    #Br_points = np.round_(np.linspace(br_range[0], br_range[1], number_of_br_points),6)
-    theta_points = np.round_(np.linspace(theta_range[0], theta_range[1], number_of_theta_points))
-    
-    for i, theta in enumerate(theta_points):
-        d_tmp = None
-        flag = False
-        p1, p2, p3 = 0.0, 0.0, 0.0
-        if i%2 == 0: Br_points = np.round_(np.linspace(br_range[0], br_range[1], number_of_br_points),6)
-        else: Br_points = np.round_(np.linspace(br_range[1], br_range[0], number_of_br_points),6)
-        for br in Br_points:
-            x0, y0 = br*np.cos(np.radians(theta)), br*np.sin(np.radians(theta)) 
-            x, y, z = rotate_vector(rot_mat, x0, y0, fixed_Bz)
-            if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-                flag = True
-                actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-                flag2 = True
-                while flag2:
-                    try:
-                        # p1, p2, p3 = LA1.x(), LA2.x(), LA3.x()
-                        p1, p2, p3 = 0.0, 0.0, 0.0
-                        time.sleep(0.1)
-                        for _ in range(20):
-                            p1 += LA1.x()
-                            p2 += LA2.x()
-                            p3 += LA3.x()
-                            time.sleep(0.05)
-                        p1 /= 20.0
-                        p2 /= 20.0
-                        p3 /= 20.0
-                        flag2 = False
-                        line_data = [vg, t_mc0, t_p0, br, theta, x0, y0, fixed_Bz,actual_Bx, actual_By, actual_Bz, p1, p2, p3]
-                    except: pass
-                if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-                else: d_tmp = line_data
-        if flag and d_tmp is not None:
-            d = d_tmp.T
-            vg1, T_mc, T_p, target_Br, target_theta, x0, y0, fixed_Bz0,actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3 = d
-            res_5 = np.float64(1.0)*res_2/res_1/meas_voltage_gain
-            res_6 = np.float64(1.0)*res_3/res_1/meas_voltage_gain
-            res_7 = np.float64(1.0)/res_5
-            res_8 = np.float64(1.0)/res_6
-            data = np.array([vg1, T_mc, T_p, target_Br, target_theta, x0, y0, fixed_Bz0,actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6, res_7, res_8])
-            DV.add(data.T)
-        
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-def scan_R_vs_BxBy_at_fixed_Bz_Vg_for_exploring_axis(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel,bx_range, by_range, number_of_bx_points, number_of_by_points, fixed_Bz, vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Bx', 'By', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'normR1', 'normR2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-    
-    Bx_points = np.round_(np.linspace(bx_range[0], bx_range[1], number_of_bx_points),6)
-    #By_points = np.linspace(by_range[0], by_range[1], number_of_by_points)
-    normalize = 1.0
-    z = fixed_Bz
-    for i, x in enumerate(Bx_points):
-        d_tmp = None
-        p1, p2, p3= 0.0, 0.0, 0.0
-        flag = False
-        if i%2 == 0: By_points = np.round_(np.linspace(by_range[0], by_range[1], number_of_by_points),6)
-        else: By_points = np.round_(np.linspace(by_range[1], by_range[0], number_of_by_points),6)
-        for y in By_points:
-            if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-                flag = True
-                actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-                normalize = math.sqrt(actual_Bx**2 + actual_By**2 + actual_Bz**2)
-                flag2 = True
-                while flag2:
-                    try:
-                        p1, p2, p3 = 0.0, 0.0, 0.0
-                        time.sleep(0.3)
-                        for _ in range(20):
-                            p1 += LA1.x()
-                            p2 += LA2.x()
-                            p3 += LA3.x()
-                            time.sleep(0.1)
-                        p1 /= 20.0
-                        p2 /= 20.0
-                        p3 /= 20.0
-                        flag2 = False
-                        r1_norm = np.float64(1.0)*p2/p1/normalize
-                        r2_norm = np.float64(1.0)*p3/p1/normalize
-                        line_data = [vg, t_mc0, t_p0, x, y, actual_Bx, actual_By, actual_Bz, p1, p2, p3, r1_norm, r2_norm]
-                    except: pass
-                if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-                else: d_tmp = line_data
-        if flag and d_tmp is not None:
-            d = d_tmp.T
-            vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6 = d
-            data = np.array([vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6])
-            DV.add(data.T)
-        
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-
-            
-
-def scan_R_vs_BxBy_at_fixed_Bz_Vg_for_exploring_axis2(misc, file_path, amplitude, frequency, meas_voltage_gain, voltage_source, voltage_channel,bx_range, by_range, number_of_bx_points, number_of_by_points, fixed_Bz, vg, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg','Tmc', 'Tp', 'Bx', 'By', 'acBx', 'acBy', 'acBz')
-    meas_var = ('Ix', 'V1', 'V2', 'normR1', 'normR2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    t_mc0, t_p0 = read_T()
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg)
-    
-    #Bx_points = np.linspace(bx_range[0], bx_range[1], number_of_bx_points)
-    By_points = np.round_(np.linspace(by_range[0], by_range[1], number_of_by_points),6)
-    normalize = 1.0
-    z = fixed_Bz
-    for i, y in enumerate(By_points):
-        flag = False
-        d_tmp = None
-        p1, p2, p3 = 0.0, 0.0, 0.0
-        if i%2 == 0: Bx_points = np.round_(np.linspace(bx_range[0], bx_range[1], number_of_bx_points),6)
-        else: Bx_points = np.round_(np.linspace(bx_range[1], bx_range[0], number_of_bx_points),6)
-        for x in Bx_points:
-            if -1.0 <= x <= 1.0 and -1.0 <= y <= 1.0:
-                flag = True
-                actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-                normalize = math.sqrt(actual_Bx**2 + actual_By**2 + actual_Bz**2)
-                flag2 = True
-                while flag2:
-                    try:
-                        p1, p2, p3 = 0.0, 0.0, 0.0
-                        time.sleep(0.3)
-                        for _ in range(20):
-                            p1 += LA1.x()
-                            p2 += LA2.x()
-                            p3 += LA3.x()
-                            time.sleep(0.1)
-                        p1 /= 20.0
-                        p2 /= 20.0
-                        p3 /= 20.0
-                        flag2 = False
-                        r1_norm = np.float64(1.0)*p2/p1/normalize
-                        r2_norm = np.float64(1.0)*p3/p1/normalize
-                        line_data = [vg, t_mc0, t_p0, x, y, actual_Bx, actual_By, actual_Bz, p1, p2, p3, r1_norm, r2_norm]
-                    except: pass
-                if d_tmp is not None: d_tmp = np.vstack([d_tmp, line_data])
-                else: d_tmp = line_data
-        if flag and d_tmp is not None:
-            d = d_tmp.T
-            vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6 = d
-
-            data = np.array([vg1, T_mc, T_p, target_Bx, target_By, actual_Bx, actual_By, actual_Bz, res_1, res_2, res_3, res_5, res_6])
-            DV.add(data.T)
-        
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg, 0.0)
-    
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-
-    
-def scan_R_vs_Vg_T(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain, voltage_source, voltage_channel,t_range, vg_range, number_of_t_lines, number_of_vg_points, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vg_ind', 'Vg',  't_ind', 'Tmc', 'Tp')
-    meas_var = ('Ix', 'V1', 'V2', 'R1', 'R2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    t_lines = np.linspace(t_range[0], t_range[1], number_of_t_lines)
-    
-    ##### Measurements start #####
-    # go to initial gate volatge
-    set_Vg_nodac(voltage_source, voltage_channel, 0.0, vg_range[0])
-
-    for ind, val in enumerate(t_lines, 1):
-        t_mc0, t_p0 = set_T(val)
-        print '\r',"Temperature Line:", ind, "out of ", number_of_t_lines
-        
-        vg_ind = np.linspace(1, number_of_vg_points, number_of_vg_points)
-        vg = gate_gain* np.linspace(vg_range[0], vg_range[1], number_of_vg_points)  
-        t_ind = np.linspace(ind, ind, number_of_vg_points)
-        t_mc = t_mc0 * np.ones(number_of_vg_points)
-        t_p = t_p0 * np.ones(number_of_vg_points)
-        
-        data1 = np.array([vg_ind, vg, t_ind, t_mc, t_p])
-        # Scan Vg and acquire data
-        data2 = scan_Vg(voltage_source, meas_voltage_gain, voltage_channel, vg_range[0], vg_range[1], number_of_vg_points, wait_time/4)
-        
-        data = np.vstack((data1, data2))
-        DV.add(data.T)
-        # go to next gate voltage
-        set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], vg_range[0])
-
-    # go to 0 V
-    set_Vg_nodac(voltage_source, voltage_channel, vg_range[1], 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-    
-    
-    
-def scan_dIdV_vs_I_idc_fixedD_fixedB(
+def scan_dIdV_vs_Idc_at_fixedD_fixedB(
     file_path,
     voltage_source,
     voltage_channel_bottom,
@@ -2511,9 +1396,7 @@ def scan_dIdV_vs_I_idc_fixedD_fixedB(
         data = np.vstack((data1, data2))
         DV.add(data.T)
         
-        
-    
-        
+
         plot_fig(file_name = scan_name, file_num = file_number, data = data, cl = list(scan_var) + list(meas_var), xsize = 12, ysize = 16, xaxis = "idc", yaxis = ['Ix', 'R1', 'R2'], xscale = [None, None], yscale = [None, None, 0,500, 0, 1000], xname = "n", yname = ['Ix', 'R1', 'R2'], logy = [False, False, False], var = 0, unit = "T")
         
         #go to next gate voltage
@@ -2593,72 +1476,6 @@ def scan_dIdV_vs_I_Bz(misc, file_path, amplitude, frequency, gate_gain, meas_vol
     ##### Measurements done #####
     date2 = datetime.datetime.now()
     write_meas_parameters_end(date1, date2, file_path)
-    
-    
-    
-def scan_dIdV_vs_I_Btheta_at_fixed_Br(misc, file_path, amplitude, frequency, gate_gain, meas_voltage_gain,bias_gain, voltage_source_DC, voltage_source_gate, voltage_channel_DC, voltage_channel_gate,vg, br, vdc_range,btheta_range, number_of_btheta_lines, number_of_vdc_points, wait_time):
-    #Get date, parameters and scan name
-    cxn0 = labrad.connect()
-    DV = cxn0.data_vault
-    date1 = datetime.datetime.now()
-    meas_parameters = get_meas_parameters()
-    scan_name = sys._getframe().f_code.co_name
-
-    #Initial settings of lockins
-    set_lockin_parameters(amplitude, frequency)
-    
-    #Create data file and save measurement parameters
-    scan_var = ('Vdc_ind', 'Idc','B_ind', 'B_theta', 'B_r', 'Bx_ac','By_ac','Bz_ac', 'Tmc', 'Tp','Vg')
-    meas_var = ('Ix', 'dV1', 'dV2', 'dVdI1', 'dVdI2', 'G1', 'G2')
-    file_number = create_file(DV, file_path, scan_name, scan_var, meas_var)
-    write_meas_parameters(DV, file_path, file_number, date1, scan_name, meas_parameters, amplitude, frequency)
-
-    #Create meshes
-    b_lines = np.linspace(bz_range[0], bz_range[1], number_of_bz_lines) 
-    t_mc0, t_p0 = read_T()
-    
-    ##### Measurements start #####
-    # go to initial gate volatge and DC voltage
-    set_Vg_nodac(voltage_source_gate, voltage_channel_gate, 0.0, vg)
-    set_Vg_nodac(voltage_source_DC, voltage_channel_DC, 0.0, vdc_range[0])
-
-    for ind, theta in enumerate(theta_lines, 1):
-        x0, y0 = Br*np.cos(theta), Br*np.sin(theta)
-        x, y, z = rotate_vector(x0, y0)
-        x, y = min(max(x, -1.0), 1.0), min(max(y, -1.0), 1.0)
-        actual_Bx, actual_By, actual_Bz = set_BxByBz(MGx, MGy, MGz, x, y, z)
-        print '\r',"Field Line:", ind, "out of ", number_of_bz_lines
-        # create index data etc.
-        vdc_ind = np.linspace(1, number_of_vdc_points, number_of_vdc_points)
-        Idc = bias_gain/1e-8 * np.linspace(vdc_range[0], vdc_range[1], number_of_vdc_points)  
-        b_ind = np.linspace(ind, ind, number_of_vdc_points)
-        b_theta = theta * np.ones(number_of_vdc_points)
-        b_r = Br*np.ones(number_of_vdc_points)
-        bx_ac = actual_Bx * np.ones(number_of_vdc_points)
-        by_ac = actual_By * np.ones(number_of_vdc_points)
-        bz_ac = actual_Bz * np.ones(number_of_vdc_points)
-        vg0 = vg * np.ones(number_of_vdc_points)
-        t_mc = t_mc0 * np.ones(number_of_vdc_points)
-        t_p = t_p0 * np.ones(number_of_vdc_points)
-        
-        data1 = np.array([vdc_ind, Idc, b_ind, b_theta, b_r, bx_ac, by_ac, bz_ac, t_mc, t_p, vg0])
-        # Scan Vg and acquire data
-        data2 = scan_Vg(voltage_source_DC, meas_voltage_gain, voltage_channel_DC, vdc_range[0], vdc_range[1], number_of_vdc_points, wait_time/4)
-        
-        data = np.vstack((data1, data2)) 
-        DV.add(data.T)
-
-        # go to next gate voltage
-        if ind < number_of_theta_lines: set_Vg_nodac(voltage_source_DC, voltage_channel_DC, vdc_range[1], vdc_range[0])
-
-    # go to 0 V both Vdc and Vg
-    set_Vg_nodac(voltage_source_DC, voltage_channel_DC, vdc_range[1], 0.0)
-    set_Vg_nodac(voltage_source_gate, voltage_channel_gate, vg, 0.0)
-    print '\r',"measurement number: ", file_number, scan_name, " done"
-    ##### Measurements done #####
-    date2 = datetime.datetime.now()
-    write_meas_parameters_end(date1, date2, file_path)
-
     
     
 def scan_R_vs_B_fixed_n_D(
@@ -2770,3 +1587,4 @@ def scan_R_vs_B_fixed_n_D(
     
     date2 = datetime.datetime.now()
     write_meas_parameters_end(date1, date2, file_path)
+    
