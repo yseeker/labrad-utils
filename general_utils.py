@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 
-def labrad_hdf5_ndarray(dir_path, file_num, file_name):
+def labradhdf5_to_ndarray(dir_path, file_num, file_name):
     """Load a hdf5 file and return the data (numpy.array) and columns of labels (list)
     
     Parameters
@@ -103,7 +103,7 @@ def get_parameters_of_func(offset = None):
     return {key: info.locals[key] for key in info.args[offset:]}
 
   
-def create_labrad_hdf5file(DV, file_path, scan_name, scan_var, meas_var):
+def ndarray_to_labradhdf5(DV, file_path, scan_name, scan_var, meas_var):
     """Create a labrad hdf5 file from ndarray.
     
     Parameters
